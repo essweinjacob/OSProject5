@@ -30,9 +30,9 @@ struct ProcessControlBlock{
 	int index;
 	pid_t pid;
 	int maxResource[MAX_RESOURCE];
-	int allocatedResource[MAX_RESOURCE];
-	int requestResource[MAX_RESOURCE];
-	int releasedResource[MAX_RESOURCE];
+	int allocResource[MAX_RESOURCE];
+	int reqResource[MAX_RESOURCE];
+	int relResource[MAX_RESOURCE];
 };
 
 struct Data{

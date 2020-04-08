@@ -9,6 +9,7 @@ void getSema();
 void getPCB();
 void getData();
 void createResources();
+void createProcess(int index);
 void semLock();
 void semRelease();
 void incTimer();
@@ -61,6 +62,9 @@ int main(int argc, int argv[]){
 		printf("Max resource for R%2d = %d, Shared resources = %d\n", i, data->resource[i], data->sharedResource[i]);
 	}
 	*/
+	for(i = 0; i < MAX_PROC; i++){
+		createProcess(i);
+	}
 
 	// Variables for forking
 	int activeChild = 0;
@@ -207,5 +211,16 @@ void createResources(){
 		// DEBUG: printf("percentShared of index %2d is %d\n", i, percentShared);
 		float sharedRound = round(data->resource[i] * ((float)percentShared * 0.01));
 		data->sharedResource[i] = (int)sharedRound;
+	}
+}
+
+void createProcess(int index){
+	int i;
+	for(i = 0; i < MAX_RESOURCE; i++){
+		pcb[index].maxResource[i] = (rand() % (data->resource[i])) + 1;
+		pcb[index].allocResource[i] = 0;
+		pcb[index].reqResource[i] = 0;
+		pcb[index].relResource[i] = 0;
+
 	}
 }
