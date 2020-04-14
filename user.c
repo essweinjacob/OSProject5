@@ -5,6 +5,7 @@ void getMsgQue();
 void getClock();
 void getSema();
 void getPCB();
+void getData();
 void semLock();
 void semRelease();
 
@@ -24,6 +25,20 @@ struct sembuf semOp;
 key_t pcbKey = -1;
 int pcbID = -1;
 struct ProcessControlBlock *pcb;
+
+// Data/Resource Variables
+key_t dataKey = -1;
+int dataID = -1;
+struct Data *data;
+
+// Message Queues
+key_t ossMsgKey = -1;
+int ossMsgID = -1;
+struct Message ossMsg;
+
+key_t usrMsgKey = -1;
+int usrMsgID = -1;
+struct Message usrMsg;
 
 int main(int argc, int argv[]){
 	// Get all shared memeory stuff
@@ -83,6 +98,35 @@ void getPCB(){
 		perror("ERROR IN USER.C: FAILED TO ATTACH MEMEORY FOR PCB");
 		exit(EXIT_FAILURE);
 	}
+}
+
+void getData(){
+	dataKey = ftok("./oss.c", 4);
+	if(dataKey == -1){
+		perror("ERROR IN USER.C: FAILED TO GENERATE KEY FOR DATA");
+		exit(EXIT_FAILURE);
+	}
+	dataID = shmget(dataKey, sizeof(struct Data), 0666 | IPC_CREAT);
+	if(dataID == -1){
+		perror("ERROR IN USER.C: FAILED TO GET KEY FOR DATA");
+		exit(EXIT_FAILURE);
+	}
+	data = shmat(dataID, (void*) 0, 0);
+	if(data == (void*)-1){
+		perror("ERROR IN USER.C: FAILED TO ATTACH MEMEORY FOR DATA");
+		exit(EXIT_FAILURE);
+	}
+}
+
+void getMsg(){
+	ossMsgKey = ftok("./oss.c", 5);
+	usrMsgKey = ftok("./oss.c", 6);
+	if(ossMsgKey == -1 || usrMsgKey == -1){
+		perror("ERROR IN USER.C: FAILED TO GENERATE KEY FOR MESSAGE QUEUES");
+		exit(EXIT_FAILURE);
+	}
+	ossMsgID = msgget(ossMsgKey, IPC_CREAT | 0600);
+	usrMsgID = msgget(usrMsgKey, IPC_CREAT | 0600);
 }
 
 void semLock(){

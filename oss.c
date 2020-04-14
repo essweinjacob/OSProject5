@@ -8,6 +8,7 @@ void getClock();
 void getSema();
 void getPCB();
 void getData();
+void getMsg();
 void createResources();
 void createProcess(int index);
 void semLock();
@@ -34,10 +35,19 @@ key_t pcbKey = -1;
 int pcbID = -1;
 struct ProcessControlBlock *pcb;
 
-// Dataa/Resource Variables
+// Data/Resource Variables
 key_t dataKey = -1;
 int dataID = -1;
 struct Data *data;
+
+// Message Queues
+key_t ossMsgKey = -1;
+int ossMsgID = -1;
+struct Message ossMsg;
+
+key_t usrMsgKey = -1;
+int usrMsgID = -1;
+struct Message usrMsg;
 
 
 int main(int argc, int argv[]){
@@ -46,6 +56,7 @@ int main(int argc, int argv[]){
 	getSema();
 	getPCB();
 	getData();
+	getMsg();
 
 	// Initialize Simulated timer
 	timer->sec = 0;
@@ -57,14 +68,25 @@ int main(int argc, int argv[]){
 	// Fill allocated
 	createResources();
 	int i;
-	/* DEBUG
+	/* DEBUG 
 	for(i = 0; i < MAX_RESOURCE; i++){
-		printf("Max resource for R%2d = %d, Shared resources = %d\n", i, data->resource[i], data->sharedResource[i]);
+		printf("Max resource for R%2d = %d, Shared = %d\n", i, data->resMax[i], data->isShare[i]);
 	}
 	*/
 	for(i = 0; i < MAX_PROC; i++){
 		createProcess(i);
 	}
+	
+	/* DEBUG
+	for(i = 0; i < MAX_PROC; i++){
+		printf("Process P%2d needs the following resources: ", i);
+		int j;
+		for(j = 0; j < MAX_RESOURCE; j++){
+			printf("R%2d: %2d ", j, pcb[i].maxResource[j]);
+		}
+		printf("\n");
+	}
+	*/
 
 	// Variables for forking
 	int activeChild = 0;
@@ -74,9 +96,9 @@ int main(int argc, int argv[]){
 	unsigned int lastSpawnSec = 0;
 	unsigned int lastSpawnNSec = 0;
 	bool spawnReady = true;
+	
 
-
-    // Program Finished
+    	// Program Finished
 	freeMem();
 
 	printf("Program finished?\n");
@@ -88,6 +110,8 @@ void freeMem(){
 	semctl(semaID, 0, IPC_RMID);
 	shmctl(pcbID, IPC_RMID, NULL);
 	shmctl(dataID, IPC_RMID, NULL);
+	msgctl(ossMsgID, IPC_RMID, NULL);
+	msgctl(usrMsgID, IPC_RMID, NULL);
 	free(listOfPIDS);
 }
 
@@ -181,6 +205,18 @@ void getData(){
 	}
 }
 
+void getMsg(){
+	ossMsgKey = ftok("./oss.c", 5);
+	usrMsgKey = ftok("./oss.c", 6);
+	if(ossMsgKey == -1 || usrMsgKey == -1){
+		perror("ERROR IN OSS.C: FAILED TO GENERATE KEY FOR MESSAGE");
+		god(1);
+		exit(EXIT_FAILURE);
+	}
+	ossMsgID = msgget(ossMsgKey, IPC_CREAT | 0600);
+	usrMsgID = msgget(usrMsgKey, IPC_CREAT | 0600);
+}
+
 void incTimer(){
 	timer->nsec += 10000;
 	while(timer->nsec >= 1000000000){
@@ -206,18 +242,21 @@ void semRelease(){
 void createResources(){
 	int i;
 	for(i = 0; i < MAX_RESOURCE; i++){
-		data->resource[i] = (rand() % 10) + 1;
-		int percentShared = (rand() % (25 - 15 + 1)) + 15;
-		// DEBUG: printf("percentShared of index %2d is %d\n", i, percentShared);
-		float sharedRound = round(data->resource[i] * ((float)percentShared * 0.01));
-		data->sharedResource[i] = (int)sharedRound;
+		data->resMax[i] = (rand() % 10) + 1;
+		data->resAvail[i] = data->resMax[i];
+		int shareBin = (rand() % 9) + 1;
+		if(shareBin < 2){
+			data->isShare[i] = true;
+		}else{
+			data->isShare[i] = false;
+		}
 	}
 }
 
 void createProcess(int index){
 	int i;
 	for(i = 0; i < MAX_RESOURCE; i++){
-		pcb[index].maxResource[i] = (rand() % (data->resource[i])) + 1;
+		pcb[index].maxResource[i] = (rand() % (data->resMax[i])) + 1;
 		pcb[index].allocResource[i] = 0;
 		pcb[index].reqResource[i] = 0;
 		pcb[index].relResource[i] = 0;

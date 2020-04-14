@@ -16,8 +16,6 @@
 #define MAX_FILE_LENGTH 1000000
 #define TOTAL_PROC 100
 #define MAX_RESOURCE 20
-#define MIN_SHARED_RESOURCES 15
-#define MAX_SHARED_RESOURCES 25
 
 // Time
 struct Clock{
@@ -36,8 +34,20 @@ struct ProcessControlBlock{
 };
 
 struct Data{
-	int resource[MAX_RESOURCE];
-	int sharedResource[MAX_RESOURCE];
+	int resMax[MAX_RESOURCE];
+	int resAvail[MAX_RESOURCE];
+	bool isShare[MAX_RESOURCE];
+};
+
+struct Message{
+	long mtype;
+	int index;
+	pid_t pid;
+	int flag;
+	bool isReq;
+	bool isRel;
+	bool isTerm;
+	bool reqSafe;
 };
 
 #endif
