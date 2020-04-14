@@ -1,7 +1,7 @@
 #include "shared.h"
 
 // Functions used
-void getMsgQue();
+void getMsg();
 void getClock();
 void getSema();
 void getPCB();
@@ -40,14 +40,22 @@ key_t usrMsgKey = -1;
 int usrMsgID = -1;
 struct Message usrMsg;
 
-int main(int argc, int argv[]){
+int main(int argc, char *argv[]){
 	// Get all shared memeory stuff
-	//getMsgQue();
+	getData();
+	getMsg();
 	getClock();
 	getSema();
 	getPCB();
 
-	return EXIT_SUCCESS;
+	// Get this proceess's pid
+	pid_t thisPID = getpid();
+	srand(thisPID);
+	int index = atoi(argv[1]);
+	//printf("Process%2d: is in childe\n", index);
+	// DEBUG printf("Have entered child\n");
+	
+	return index;
 }
 
 void getClock(){

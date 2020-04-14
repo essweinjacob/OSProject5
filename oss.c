@@ -14,11 +14,12 @@ void createProcess(int index);
 void semLock();
 void semRelease();
 void incTimer();
+void spawnCheck();
 
 // Global Variables
 // Pid list info
 int *listOfPIDS;
-int numOfPIDS = 0;
+int forkIndex = -1;
 
 // Clock variables
 key_t clockKey = -1;
@@ -49,6 +50,11 @@ key_t usrMsgKey = -1;
 int usrMsgID = -1;
 struct Message usrMsg;
 
+// Spawn Ready variables
+bool spawnReady = true;
+unsigned int lastSpawnSec = 0;
+unsigned int lastSpawnNSec = 0;
+
 
 int main(int argc, int argv[]){
 	// Set up all shared memory
@@ -58,9 +64,9 @@ int main(int argc, int argv[]){
 	getData();
 	getMsg();
 
-	// Initialize Simulated timer
-	timer->sec = 0;
-	timer->nsec = 0;
+	// Set up signal handling
+	signal(SIGINT, god);
+	signal(SIGPROF, god);
 
 	// Random Number generator
 	srand(time(NULL));
@@ -91,12 +97,86 @@ int main(int argc, int argv[]){
 	// Variables for forking
 	int activeChild = 0;
 	pid_t pid;
-	int status;
-	int exitChild = 0;
-	unsigned int lastSpawnSec = 0;
-	unsigned int lastSpawnNSec = 0;
-	bool spawnReady = true;
+	int exitCount = 0;
+	listOfPIDS = calloc(TOTAL_PROC, sizeof(int));
 	
+	// This will be used to see if a proc index is in use
+	bool procAvail[18];
+	for(i = 0; i < MAX_PROC; i++){
+		procAvail[i] = true;
+	}
+
+
+	// Initialize simulated timer
+	timer->sec = 0;
+	timer->nsec = 0;
+	
+	while(1){
+		forkIndex = (forkIndex + 1) % MAX_PROC;
+		//Check if ready to fork
+		if(spawnReady == true && activeChild < MAX_PROC && exitCount < TOTAL_PROC && procAvail[forkIndex] == true){
+			pid = fork();
+			// DEBUG printf("PID = %d\n", pid);
+			// On failure to fork
+			if(pid < 0){
+				perror("FAILED TO FORK");
+				god(1);
+				exit(EXIT_FAILURE);
+			}
+			// Create Child
+			if(pid == 0){
+				char convIndex[1024];
+				sprintf(convIndex, "%d", forkIndex);
+				char *args[] = {"./user", convIndex, NULL};
+				int exeStatus = execvp(args[0], args);
+				if(exeStatus == -1){
+					perror("FAILED TO LAUNCH CHILD\n");
+					god(1);
+				}
+			}else{
+				// In parent
+				printf("P%2d has launched at %2d:%9d\n", forkIndex, timer->sec, timer->nsec);
+				procAvail[forkIndex] = false;
+				listOfPIDS[forkIndex] = pid;
+				activeChild++;
+				spawnReady = false;
+				lastSpawnSec = timer->sec;
+				lastSpawnNSec = timer->nsec;
+			}
+		}
+		/* DEBUG else{
+			//printf("Index %d was skipped heres why: spawnReady: %d, activeChild: %d, exitCount: %d, procAvail: %d\n", forkIndex, spawnReady, activeChild, exitCount, procAvail[forkIndex]);
+			
+		}*/
+
+		// Check if child has ended
+		int status;
+		pid_t childPid = waitpid(-1, &status, WNOHANG);
+		if(childPid > 0){
+			int returnIndex = WEXITSTATUS(status);
+			printf("P%2d has exited at time %2d:%9d\n", returnIndex, timer->sec, timer->nsec);
+			procAvail[returnIndex] = true;
+			activeChild--;
+			exitCount++;
+			if(exitCount >= TOTAL_PROC && activeChild == 0){
+				break;
+			}
+		}
+
+		// DEBUG printf("Active children  = %d\n", activeChild);
+		// Fail safe for forking to prevent fork bomb
+		if(activeChild > MAX_PROC){
+			perror("FORK BOMB PREVENTED");
+			god(1);
+		}
+		
+		incTimer();
+		// Check to see if enough time has passed for another process to spawn
+		if(spawnReady == false){
+			spawnCheck();
+		}
+
+	}
 
     	// Program Finished
 	freeMem();
@@ -117,7 +197,7 @@ void freeMem(){
 
 void god(int signal){
 	int i;
-	for(i = 0; i < numOfPIDS; i++){
+	for(i = 0; i < MAX_PROC; i++){
 		kill(listOfPIDS[i], SIGTERM);
 	}
 	printf("GOD HAS BEEN CALLED AND THE RAPTURE HAS BEGUN. SOON THERE WILL BE NOTHING\n");
@@ -218,11 +298,16 @@ void getMsg(){
 }
 
 void incTimer(){
+	semLock();
+
+	//int nsecInc = (rand() % 10000) + 1;
 	timer->nsec += 10000;
 	while(timer->nsec >= 1000000000){
 		timer->sec++;
 		timer->nsec -= 1000000000;
 	}
+
+	semRelease();
 }
 
 void semLock(){
@@ -261,5 +346,12 @@ void createProcess(int index){
 		pcb[index].reqResource[i] = 0;
 		pcb[index].relResource[i] = 0;
 
+	}
+}
+
+void spawnCheck(){
+	int randomTime = (rand() % 500) + 1;
+	if((((timer->sec * 1000000000) + timer->nsec) - ((lastSpawnSec * 1000000000) + lastSpawnNSec)) >= randomTime){
+		spawnReady = true;
 	}
 }
