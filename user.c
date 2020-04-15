@@ -32,9 +32,9 @@ int dataID = -1;
 struct Data *data;
 
 // Message Queues
-key_t ossMsgKey = -1;
-int ossMsgID = -1;
-struct Message ossMsg;
+//key_t ossMsgKey = -1;
+//int ossMsgID = -1;
+//struct Message ossMsg;
 
 key_t usrMsgKey = -1;
 int usrMsgID = -1;
@@ -52,134 +52,126 @@ int main(int argc, char *argv[]){
 	pid_t thisPID = getpid();
 	srand(thisPID);
 	int index = atoi(argv[1]);
-
-	bool isReq = false;
-	bool isAcq = false;
-	bool ranSec = false;
+	int i;
+	bool touchedResource = false;
+	bool isRequesting = false;
+	bool isAcquire = false;
 	struct Clock userStartClock;
 	struct Clock userEndClock;
-	userStartClock.sec = timer->sec;
-	userStartClock.nsec = timer->nsec;
+	bool ranSec = false;
 
-	//printf("Process%2d: is in childe\n", index);
-	// DEBUG printf("Have entered child\n");
-	
 	while(1){
-		int rcvStat = msgrcv(ossMsgID, &ossMsg, (sizeof(struct Message) - sizeof(long)), getpid(), 0);
-		//printf("USER: RCV ERROR: %s\n", strerror(errno));
+		// Wait for message from OSS
+		msgrcv(usrMsgID, &usrMsg, (sizeof(struct Message) - sizeof(long)), getpid(), 0);
 
-		// Check and see if process has ran for a second
+		// Has the process ran for a second yet?
 		if(!ranSec){
 			userEndClock.sec = timer->sec;
 			userEndClock.nsec = timer->nsec;
-
-			if((((userEndClock.sec * 1000000000) + userEndClock.nsec) - ((userStartClock.sec * 1000000000) + userStartClock.nsec)) >= 1000000000){
+			if(((userEndClock.sec * 1000000000 + userEndClock.nsec) - (userStartClock.sec * 1000000000 + userStartClock.nsec)) >= 1000000000){
 				ranSec = true;
-				printf("process has ran for a second\n");
 			}
 		}
 
-		/* Determine what the child does
-		 * 0 - Process should request resources
-		 * 1 - Process should release resources
-		 * 2 - Process should early term and free up resources
+		/* Have user process randomly decide what it will do
+		 * 0 - Process will request resources
+		 * 1 - Process will release resources
+		 * 2 - Process will terminate and release all resources
 		 */
-		bool isTerm = false;
-		bool isRele = false;
+		bool isTerming = false;
+		bool isReleasing = false;
 		int choice;
-		// If the process has run for at least a second
-		if(ranSec){
-			choice = rand() % 3;
-		}else{
+		if(!touchedResource || !ranSec){
 			choice = rand() % 2;
+		}else{
+			choice = rand() % 3;
 		}
-		
-		// Perform action
-		// Request resources
-		int randResource;
+
+		// If requesing
+		int randomResource;
 		if(choice == 0){
-			// Make sure process isnt already requesting resources
-			if(!isReq){
-				// Request only a resource we need
+			touchedResource = true;
+			// Make sure we arent already requesting
+			if(!isRequesting){
 				while(1){
-					randResource = rand() % 20;
-					// Makes sure we are requesting a resource we need
-					if(pcb[index].maxResource[randResource] > 0){
-						// Choose an amount between what we need and 1
-						int requestAmount = rand() % (pcb[index].maxResource[randResource]-pcb[index].allocResource[randResource]);
-						// Resources 
-						pcb[index].reqResource[randResource] = requestAmount;
-						isReq = true;
-						usrMsg.isTerm = false;
-						usrMsg.resType = randResource;
+					if(pcb[index].maxResource[randomResource] > 0){
+						pcb[index].reqResource[randomResource] = rand() % (pcb[index].maxResource[randomResource] - pcb[index].allocResource[randomResource] + 1);
 						break;
 					}
 				}
-			}	
+				isRequesting = true;
+			}
 		}else if(choice == 1){
-			// Make sure we have resources in this process before releaseing them
-			if(isAcq){
-				while(1){
-					randResource = rand() % 20;
-					// If we have more then one of a specific resource
-					if(pcb[index].allocResource[randResource] > 0){
-						pcb[index].relResource[randResource] = pcb[index].allocResource[randResource];
-						isRele = true;
-						usrMsg.isTerm = false;
-						usrMsg.resType = randResource;
-						break;
-					}
+			// Before we release resources, make sure it even has any
+			if(isAcquire){
+				for(i = 0; i < MAX_RESOURCE; i++){
+					pcb[index].relResource[i] = pcb[index].allocResource[i];
 				}
+				isReleasing = true;
 			}
 		}else if(choice == 2){
-			isTerm = true;
+			isTerming = true;
 		}
 
-		// Tell master what it did
+		// Send message back to OSS with what the user process want to do
+		// Im sure theres a better way to do this but my brain is fried
 		usrMsg.mtype = 1;
-		if(isReq){
-			usrMsg.isReq = true;
-		}else{
-			usrMsg.isReq = false;
-		}
-		if(isRele){
-			usrMsg.isRel = true;
-		}else{
-			usrMsg.isRel = false;
-		}
-		if(isTerm){
+		if(isTerming){
 			usrMsg.isTerm = true;
 		}else{
 			usrMsg.isTerm = false;
 		}
+		if(isRequesting){
+			usrMsg.isReq = true;
+		}else{
+			usrMsg.isReq = false;
+		}
+		if(isReleasing){
+			usrMsg.isRel = true;
+		}else{
+			usrMsg.isRel = false;
+		}
 
-		usrMsg.index = ossMsg.index;
-		usrMsg.pid = ossMsg.pid;
 		msgsnd(usrMsgID, &usrMsg, (sizeof(struct Message) - sizeof(long)), 0);
-		//printf("USER SND ERROR: %s\n", strerror(errno));
 
-
-		// What to do after telling OSS what it did
-		if(isTerm){
+		// Determine if process needs to go back to sleep or not
+		if(isTerming){
+			//printf("Terming in user process\n");
 			break;
 		}else{
-			// If its not going to terminate, then act on what the OSS tells it back
-			// If it requested resources...
-			if(isReq){
-				msgrcv(ossMsgID, &ossMsg, (sizeof(struct Message) - sizeof(long)), getpid(), 0);
-				//printf("USER RCV RESPONCE: %s\n", strerror(errno));
-				// ... was told hit was allowed those resources
-				if(ossMsg.isSafe == true){
-					//printf("user request receive message received\n");
-					isAcq = true;
-					isReq = false;
+			/* Update resporces depending on
+			 * 1 - If request was granted
+			 * 2 - If request wasnt granted
+			 * 3 - If releaseing
+			 */
+			if(isRequesting){
+				msgrcv(usrMsgID, &usrMsg, (sizeof(struct Message) - sizeof(long)), getpid(), 0);
+				// Is request for resources was granted
+				if(usrMsg.isSafe == true){
+					for(i = 0; i < MAX_RESOURCE; i++){
+						pcb[index].allocResource[i] += pcb[index].reqResource[i];
+						pcb[index].reqResource[i] = 0;
+					}
+					isRequesting = false;
+					isAcquire = true;
+				}else{
+					//printf("Receving that request failed\n");
+					//pcb[index].reqResource[i] = 0;
+					//isRequesting = false;
 				}
-			}else if(isRele){
-				isRele = false;
+			}
+			// If we are releasing resources
+			if(isReleasing){
+				for(i = 0; i < MAX_RESOURCE; i++){
+					pcb[index].allocResource[i] -= pcb[index].relResource[i];
+					pcb[index].relResource[i] = 0;
+				}
+				isAcquire = false;
 			}
 		}
+
 	}
-	
+
 	return index;
 }
 
@@ -252,13 +244,13 @@ void getData(){
 }
 
 void getMsg(){
-	ossMsgKey = ftok("./oss.c", 5);
-	usrMsgKey = ftok("./oss.c", 6);
-	if(ossMsgKey == -1 || usrMsgKey == -1){
+	//ossMsgKey = ftok("./oss.c", 5);
+	usrMsgKey = ftok("./oss.c", 5);
+	if(/*ossMsgKey == -1 ||*/ usrMsgKey == -1){
 		perror("ERROR IN USER.C: FAILED TO GENERATE KEY FOR MESSAGE QUEUES");
 		exit(EXIT_FAILURE);
 	}
-	ossMsgID = msgget(ossMsgKey, IPC_CREAT | 0600);
+	//ossMsgID = msgget(ossMsgKey, IPC_CREAT | 0600);
 	usrMsgID = msgget(usrMsgKey, IPC_CREAT | 0600);
 }
 

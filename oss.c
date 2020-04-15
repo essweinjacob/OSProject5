@@ -15,8 +15,11 @@ void semLock();
 void semRelease();
 void incTimer();
 void spawnCheck();
-bool bankers(int index, int resType);
-void releaseRes(int index, int resType);
+void setMat(int max[][MAX_RESOURCE], int alloc[][MAX_RESOURCE], int count);
+void calcNeedMat(int need[][MAX_RESOURCE], int max[][MAX_RESOURCE], int alloc[][MAX_RESOURCE], int count);
+void displayArr(char *action, char *lName, int arr[MAX_RESOURCE]);
+void displayMat(char *matrixName, int matrix[][MAX_RESOURCE], int count);
+bool bankers(int index);
 
 // Global Variables
 // Pid list info
@@ -48,16 +51,23 @@ key_t ossMsgKey = -1;
 int ossMsgID = -1;
 struct Message ossMsg;
 
-key_t usrMsgKey = -1;
-int usrMsgID = -1;
-struct Message usrMsg;
-
 // Spawn Ready variables
 bool spawnReady = true;
 unsigned int lastSpawnSec = 0;
 unsigned int lastSpawnNSec = 0;
 
-int main(int argc, int argv[]){
+// Queue
+static struct Queue *queue;
+
+// Verbose and line count are global because im lazy
+bool verbose = false;
+int lineCount = 0;
+
+// File Variables
+//FILE *fLOG = NULL;
+
+
+int main(int argc, char *argv[]){
 	// Set up all shared memory
 	getClock();
 	getSema();
@@ -68,6 +78,38 @@ int main(int argc, int argv[]){
 	// Set up signal handling
 	signal(SIGINT, god);
 	signal(SIGPROF, god);
+
+	// Getopt stuff
+	int opt;
+	while((opt = getopt(argc, argv, "hv")) != -1){
+		switch(opt){
+			case 'h':
+				printf("---HELP MENU---\n");
+				printf("-h: Prints help menu\n");
+				printf("-v: Turns on verbose (off by default)\n");
+				exit(0);
+			case 'v':
+				verbose = true;
+				break;
+			default:
+				printf("Please use -h for help menu you twit\n");
+				exit(EXIT_FAILURE);
+		}
+	}
+
+	// Make sure there arent any extra arguments
+	if(optind < argc){
+		printf("OSS ERROR EXTRA ARGUMENTS GIVEN LOOK AT -h FOR HELP MENU PLEASE\n");
+		exit(EXIT_FAILURE);
+	}
+	/*
+	// Open File log
+	fLOG = fopen("resourceActivityLog", "w");
+	if(fLOG = NULL){
+		perror("OSS FAILED TO OPEN RESOURCE ACTVITY LOG");
+		exit(EXIT_FAILURE);
+	}
+	*/
 
 	// Random Number generator
 	srand(time(NULL));
@@ -81,6 +123,7 @@ int main(int argc, int argv[]){
 	pid_t pid;
 	int exitCount = 0;
 	int maxLaunch = 0;
+	bool newProc = false;
 	listOfPIDS = calloc(TOTAL_PROC, sizeof(int));
 	
 	// This will be used to see if a proc index is in use
@@ -94,7 +137,11 @@ int main(int argc, int argv[]){
 	timer->sec = 0;
 	timer->nsec = 0;
 	
+	// Setup Queue to put processes inside of
+	queue = createQueue();
+	
 	while(1){
+		// Generate Fork index by getting the remainder of current fork index + 1 / 18
 		forkIndex = (forkIndex + 1) % MAX_PROC;
 		//printf("Fork Index: %d\n", forkIndex);
 		//Check if ready to fork
@@ -119,76 +166,135 @@ int main(int argc, int argv[]){
 			}else{
 				// In parent
 				printf("P%d has launched at %d:%d\n", forkIndex, timer->sec, timer->nsec);
+				//fprintf(fLOG, "P%d has launched at %d:%d\n", forkIndex, timer->sec, timer->nsec);
 				procAvail[forkIndex] = false;
 				listOfPIDS[forkIndex] = pid;
 				activeChild++;
 				maxLaunch++;
 				spawnReady = false;
+				
+				// Record Spawn time
 				lastSpawnSec = timer->sec;
 				lastSpawnNSec = timer->nsec;
 
 				// Put details into pcb and message
 				createProcess(forkIndex, pid);
+				enQueue(queue, forkIndex);
 			}
-		}
-		/*else{
-			printf("Index %d was skipped heres why: spawnReady: %d, activeChild: %d, exitCount: %d, procAvail: %d\n", forkIndex, spawnReady, activeChild, exitCount, procAvail[forkIndex]);
-			
+		}/*DEBUG
+		else{
+			printf("Whyd we skip a fork? spawnReady = %d, activeChild = %d, exitCount = %d, maxLaunch = %d, procAvail[%d] = %d\n", spawnReady, activeChild, exitCount, maxLaunch, forkIndex, procAvail[forkIndex]);
 		}*/
 
-		incTimer();
+		// Go through Nodes/Processes to see what they want if anything
+		struct QNode next;
+		struct Queue *trackQueue = createQueue();	// Create a temporary queue
 
-		while(1){
-			// Put current index's information into message
-			ossMsg.mtype = ossMsg.pid = pcb[forkIndex].pid;
-			ossMsg.index = forkIndex;
+		int currentIter = 0;
+		//printf("here?\n");
+		next.next = queue->front;
+		// While the next item isn't empty / while a process still exists
+		while(next.next != NULL){
+			incTimer();
 
-			// Tell user process to run
+			int childIndex = next.next->index;
+			// Give details to message
+			ossMsg.mtype = ossMsg.pid = pcb[childIndex].pid;
+			ossMsg.index = childIndex;
+			// Send message to child saying its their turn
 			msgsnd(ossMsgID, &ossMsg, (sizeof(struct Message) - sizeof(long)), 0);
-			//printf("OSS: SND ERROR: %s\n", strerror(errno));
-			
 
-			// Receive message back from user process
-			msgrcv(usrMsgID, &usrMsg, (sizeof(struct Message) - sizeof(long)), 1, 0);
-			//printf("OSS: RCV ERROR: %s\n", strerror(errno));
+			// Wait for a responce from the child
+			msgrcv(ossMsgID, &ossMsg, (sizeof(struct Message) - sizeof(long)), 1, 0);
 
 			incTimer();
 			
-			// If user process says that the process terminated
-			if(usrMsg.isTerm == true){
-				printf("OSS: P%d finished running at %d:%d\n", usrMsg.index, timer->sec, timer->nsec);
-				break;
+			// If the process wants to terminate
+			if(ossMsg.isTerm == true){
+				printf("OSS P%d has finished running at time %d:%d\n", ossMsg.index, timer->sec, timer->nsec);
+				//fprintf(fLOG, "OSS P%d has finished running at time %d:%d\n", ossMsg.index, timer->sec, timer->nsec);
+				// Remove itself from the queue and find next node
+				struct QNode current;
+				current.next = queue->front;
+				while(current.next != NULL){
+					if(current.next->index != childIndex){
+						enQueue(trackQueue, current.next->index);
+					}
+
+					// Point to next available process
+					if(current.next->next != NULL){
+						current.next = current.next->next;
+					}else{
+						current.next = NULL;
+					}
+				}
+				// Reassign all the queues
+				while(!isQueueEmpty(queue)){
+					deQueue(queue);
+				}
+				while(!isQueueEmpty(trackQueue)){
+					int i = trackQueue->front->index;
+					enQueue(queue, i);
+					deQueue(trackQueue);
+				}
+
+				// Point to next process/queue element
+				next.next = queue->front;
+				int i;
+				for(i = 0; i < currentIter; i++){
+					if(next.next->next != NULL){
+						next.next = next.next->next;
+					}else{
+						next.next = NULL;
+					}
+				}
+				continue;
 			}
-			// If user process wants to get resources
-			if(usrMsg.isReq == true){
-				printf("OSS has detected process P%d requesting R%d at time %d:%d\n", usrMsg.index, usrMsg.resType, timer->sec, timer->nsec);
 
-				// Launch Banker's Algorithm to see if its safe to give process a resource
-				ossMsg.mtype = pid;
+			incTimer();
+			
+			// If the user process is requesting resources
+			if(ossMsg.isReq == true){
+				printf("OSS P%d is requesting resources at time %d:%d\n", ossMsg.index, timer->sec, timer->nsec);
+				//fprintf(fLOG, "OSS P%d is requesting resources at time %d:%d\n", ossMsg.index, timer->sec, timer->nsec);
 
+				bool isSafe = bankers(childIndex);
+				
 				incTimer();
 
-				bool isSafe = bankers(usrMsg.index, usrMsg.resType);
+				// Send message to user process saying its safe to request resources or not
+				ossMsg.mtype = pcb[childIndex].pid;
 				if(isSafe){
 					ossMsg.isSafe = true;
-					printf("OSS has granted P%d request of R%d at time %d:%d\n", usrMsg.index, usrMsg.resType, timer->sec, timer->nsec);
+					printf("OSS P%d has been granted resources at time %d:%d\n", ossMsg.index, timer->sec, timer->nsec);
+					//fprintf(fLOG, "OSS P%d has been granted resources at time %d:%d\n", ossMsg.index, timer->sec, timer->nsec);
 				}else{
-					printf("OSS has denied P%d request of R%d at time %d:%d\n", usrMsg.index, usrMsg.resType, timer->sec, timer->nsec);
 					ossMsg.isSafe = false;
+					printf("OSS P%d has been denied resources at time %d:%d. Putting it to sleep.\n", ossMsg.index, timer->sec, timer->nsec);
+					//fprintf(fLOG, "OSS P%d has been denied resources at time %d:%d. Putting it to sleep.\n", ossMsg.index, timer->sec, timer->nsec);
 				}
-				// Tell user process if it was given resources or not
 				msgsnd(ossMsgID, &ossMsg, (sizeof(struct Message) - sizeof(long)), 0);
-				//printf("OSS: SND ERROR: %s\n", strerror(errno));
-				break;
 			}
-			// If user process wants to release resources
-			if(usrMsg.isRel == true){
-				printf("OSS has detected process P%d releaseing R%d at time %d:%d\n", usrMsg.index, usrMsg.resType, timer->sec, timer->nsec);
-				releaseRes(usrMsg.index, usrMsg.resType);
-				break;
+
+			incTimer();
+
+			// If user process is releaseing resources
+			if(ossMsg.isRel){
+				printf("OSS P%d is releaseing resources at time %d:%d\n", ossMsg.index, timer->sec, timer->nsec);
+				//fprintf(fLOG, "OSS P%d is releaseing resources at time %d:%d\n", ossMsg.index, timer->sec, timer->nsec);
+			}
+			
+			currentIter++;
+			// Point to next element
+			if(next.next->next != NULL){
+				next.next = next.next->next;
+			}else{
+				next.next = NULL;
 			}
 		}
-
+		//printf("Did we escape???\n");
+		// Free the temporary queue
+		free(trackQueue);
 		incTimer();
 
 		// Check if child has ended
@@ -196,7 +302,8 @@ int main(int argc, int argv[]){
 		pid_t childPid = waitpid(-1, &status, WNOHANG);
 		if(childPid > 0){
 			int returnIndex = WEXITSTATUS(status);
-			// DEBUG printf("P%2d has exited at time %2d:%9d\n", returnIndex, timer->sec, timer->nsec);
+			printf("P%2d has exited at time %2d:%9d\n", returnIndex, timer->sec, timer->nsec);
+			//fprintf(fLOG, "P%2d has exited at time %2d:%9d\n", returnIndex, timer->sec, timer->nsec);
 			procAvail[returnIndex] = true;
 			activeChild--;
 			exitCount++;
@@ -207,7 +314,7 @@ int main(int argc, int argv[]){
 
 		// DEBUG printf("Active children  = %d\n", activeChild);
 		// Fail safe for forking to prevent fork bomb
-		if(activeChild > MAX_PROC){
+		if(activeChild >= MAX_PROC){
 			perror("FORK BOMB PREVENTED");
 			god(1);
 		}
@@ -226,8 +333,6 @@ int main(int argc, int argv[]){
 
     	// Program Finished
 	freeMem();
-
-	printf("Program finished?\n");
 }
 
 
@@ -237,8 +342,9 @@ void freeMem(){
 	shmctl(pcbID, IPC_RMID, NULL);
 	shmctl(dataID, IPC_RMID, NULL);
 	msgctl(ossMsgID, IPC_RMID, NULL);
-	msgctl(usrMsgID, IPC_RMID, NULL);
+	//msgctl(usrMsgID, IPC_RMID, NULL);
 	free(listOfPIDS);
+	//fclose(fLOG);
 }
 
 void god(int signal){
@@ -247,6 +353,7 @@ void god(int signal){
 		kill(listOfPIDS[i], SIGTERM);
 	}
 	printf("GOD HAS BEEN CALLED AND THE RAPTURE HAS BEGUN. SOON THERE WILL BE NOTHING\n");
+	//fprintf(fLOG, "GOD HAS BEEN CALLED AND THE RAPTURE HAS BEGUN. SOON THERE WILL BE NOTHING\n");
 	freeMem();
 	kill(getpid(), SIGTERM);
 }
@@ -333,21 +440,25 @@ void getData(){
 
 void getMsg(){
 	ossMsgKey = ftok("./oss.c", 5);
-	usrMsgKey = ftok("./oss.c", 6);
-	if(ossMsgKey == -1 || usrMsgKey == -1){
+	//usrMsgKey = ftok("./oss.c", 6);
+	if(ossMsgKey == -1 /*|| usrMsgKey == -1*/){
 		perror("ERROR IN OSS.C: FAILED TO GENERATE KEY FOR MESSAGE");
 		god(1);
 		exit(EXIT_FAILURE);
 	}
 	ossMsgID = msgget(ossMsgKey, IPC_CREAT | 0600);
-	usrMsgID = msgget(usrMsgKey, IPC_CREAT | 0600);
+	//usrMsgID = msgget(usrMsgKey, IPC_CREAT | 0600);
 }
 
+/*
+ * This process puts a semaphore lock on the timer, increases the time by a random amount between 1000 - 1 and checks in enough
+ * microsconds have passed to equal a second and does math for it
+ */
 void incTimer(){
 	semLock();
 
-	//int nsecInc = (rand() % 10000) + 1;
-	timer->nsec += 10000;
+	int nsecInc = (rand() % 1000) + 1;
+	timer->nsec += nsecInc;
 	while(timer->nsec >= 1000000000){
 		timer->sec++;
 		timer->nsec -= 1000000000;
@@ -371,51 +482,307 @@ void semRelease(){
 	semop(semaID, &semOp, 1);
 }
 
+/*
+ * This function creates all resource descriptors
+ */
 void createResources(){
 	int i;
 	for(i = 0; i < MAX_RESOURCE; i++){
-		data->resMax[i] = (rand() % 10) + 1;
-		data->resAvail[i] = data->resMax[i];
+		// Amount of a resource is determined randomly [1-10]
+		data->maxResource[i] = (rand() % 10) + 1;
+		data->resource[i] = data->maxResource[i];
 		int shareBin = (rand() % 9) + 1;
+		// If random number is between [0-2] the resource is shared, [3-8] it is not
 		if(shareBin < 2){
-			data->isShare[i] = true;
-		}else{
-			data->isShare[i] = false;
+			data->sharedNum++;
 		}
 	}
 }
 
+/*
+ * This function creates processes
+ */
 void createProcess(int index, pid_t pid){
 	int i;
 	pcb[index].index = index;
 	pcb[index].pid = pid;
 	for(i = 0; i < MAX_RESOURCE; i++){
-		pcb[index].maxResource[i] = (rand() % (data->resMax[i])) + 1;
+		pcb[index].maxResource[i] = (rand() % (data->maxResource[i])) + 1;
 		pcb[index].allocResource[i] = 0;
 		pcb[index].reqResource[i] = 0;
 		pcb[index].relResource[i] = 0;
 	}
 }
 
+/*
+ * This function checks if enough time has passed for a new process to start
+ * 1000 nanoseconds = 1 microsecond
+ */
 void spawnCheck(){
-	int randomTime = (rand() % 500) + 1;
+	int randomTime = (rand() % (500000 - 1000 + 1)) + 1000;
 	if((((timer->sec * 1000000000) + timer->nsec) - ((lastSpawnSec * 1000000000) + lastSpawnNSec)) >= randomTime){
 		spawnReady = true;
 	}
 }
 
-bool bankers(int index, int resType){
-	if(data->resAvail[resType] >= pcb[index].reqResource[resType]){
-		pcb[index].allocResource[resType] += pcb[index].reqResource[resType];
-		data->resAvail[resType] -= pcb[index].reqResource[resType];
-		pcb[index].reqResource[resType] = 0;
-		return true;
-	}else{
-		return false;
+/*
+ * Creates matri(es?)
+ */
+void setMat(int max[][MAX_RESOURCE], int alloc[][MAX_RESOURCE], int count){
+	struct QNode next;
+	next.next = queue->front;
+
+	int i, j;
+
+	int childIndex = next.next->index;
+	// Copy values into max and alloc matri so we have a more convient names
+	for(i = 0; i < count; i++){
+		for(j = 0; j < MAX_RESOURCE; j++){
+			max[i][j] = pcb[childIndex].maxResource[j];
+			alloc[i][j] = pcb[childIndex].allocResource[j];
+		}
+
+		// Point to next element
+		if(next.next->next != NULL){
+			next.next = next.next->next;
+			childIndex = next.next->index;
+		}else{
+			next.next = NULL;
+		}
 	}
 }
 
-void releaseRes(int index, int resType){
-	data->resAvail[resType] += pcb[index].allocResource[resType];
-	pcb[index].allocResource[resType] = 0;
+/*
+ * This function calculates how much of each resource a process needs
+ */
+void calcNeedMat(int need[][MAX_RESOURCE], int max[][MAX_RESOURCE], int alloc[][MAX_RESOURCE], int count){
+	int i, j;
+	for(i = 0; i < count; i++){
+		for(j = 0; j < MAX_RESOURCE; j++){
+			// Math to find need
+			need[i][j] = max[i][j] - alloc[i][j];
+		}
+	}
+}
+
+/*
+ * This diplays the Available and Request Arrays
+ */
+void displayArr(char *action, char *lName, int arr[MAX_RESOURCE]){
+	printf("---%s Resource---\n%3s : ", action, lName);
+	//fprintf(fLOG, "---%s Resource---\n%3s : ", action, lName);
+	int i;
+	// Print for each resource
+	for(i = 0; i < MAX_RESOURCE; i++){
+		printf("%2d", arr[i]);
+		//fprintf(fLOG, "%2d", arr[i]);
+		if(i < MAX_RESOURCE - 1){
+			printf(" | ");
+			//fprintf(fLOG, " | ");
+		}
+	}
+	printf("|\n");
+	//fprintf(fLOG, "|\n");
+}
+
+/*
+ * This function displays the Maximum and Allocated Resources Matri
+ */
+
+void displayMat(char *matrixName, int matrix[][MAX_RESOURCE], int count){
+	struct QNode next;
+	next.next = queue->front;
+
+	int i, j;
+	printf("---%s Matrix---\n", matrixName);
+	//fprintf(fLOG, "---%s Matrix---\n", matrixName);
+
+	for(i = 0; i < count; i++){
+		printf("P%2d : ", next.next->index);
+		//fprintf(fLOG, "P%2d : ", next.next->index);
+		for(j = 0; j < MAX_RESOURCE; j++){
+			printf("%2d", matrix[i][j]);
+			//fprintf(fLOG, "%2d", matrix[i][j]);
+			if(j < MAX_RESOURCE - 1){
+				printf(" | ");
+				//fprintf(fLOG, " | ");
+			}
+		}
+		printf("|\n");
+		//fprintf(fLOG, "|\n");
+
+		// Point to next element
+		if(next.next->next != NULL){
+			next.next = next.next->next;
+		}else{
+			next.next = NULL;
+		}
+	}
+}
+
+bool bankers(int index){
+	/*
+	 * i - Used for lloping
+	 * k - Used to find an unfinished process with resources available
+	 * j - Checks if resources of current process is < work
+	 * l - Add allocated resources of current process to available resources
+	 */
+	int i, j, k, l;
+
+	// Make sure the queue is not empty
+	struct QNode next;
+	next.next = queue->front;
+	if(next.next == NULL){
+		return true;
+	}
+
+	int count = getQueueCount(queue);	// Amount of procs in queue
+	int max[count][MAX_RESOURCE];		// Maxium Matrix
+	int alloc[count][MAX_RESOURCE];		// Allocated Resource in a Proc
+	int request[MAX_RESOURCE];		// Resources Requested by a Proc
+	int need[count][MAX_RESOURCE];		// Resources needed by a Proc
+	int available[MAX_RESOURCE];		// Resources Available by a particular resource descriptor
+
+	// Set up matrix given resources, queue, and pcb
+	setMat(max, alloc, count);
+	// Calulate matrix needs
+	calcNeedMat(need, max, alloc, count);
+
+	// Set up avail and request arrays
+	for(i = 0; i < MAX_RESOURCE; i++){
+		available[i] = data->resource[i];
+		request[i] = pcb[index].reqResource[i];
+	}
+	// Update available array
+	for(i = 0; i < count; i++){
+		for(j = 0; j < MAX_RESOURCE; j++){
+			available[j] -= alloc[i][j];
+		}
+	}
+
+	// Map pcb index to need array
+	int id = 0;
+	next.next = queue->front;
+	while(next.next != NULL){
+		if(next.next->index == index){
+			break;
+		}
+		id++;
+
+		// Point to next element
+		if(next.next->next != NULL){
+			next.next = next.next->next;
+		}else{
+			next.next = NULL;
+		}
+	}
+
+	// Display information
+	if(verbose){
+		displayMat("Maximum", max, count);
+		displayMat("Allocation", alloc, count);
+		char str[1024];
+		sprintf(str, "P%2d", index);
+		displayArr("Request", str, request);
+	}
+
+	// Try to find a "Safe Sequence"
+	bool finish[count];	// To store finsih
+	int safeSeq[count];	// Store the path of safe sequence
+	memset(finish, 0, count * sizeof(finish[0]));	// Mark all processes as not finished
+
+
+	// Make copy of available resources
+	int work[MAX_RESOURCE];
+	for(i = 0; i < MAX_RESOURCE; i++){
+		work[i] = available[i];
+	}
+
+	// Request Algorithm
+	for(j = 0; j < MAX_RESOURCE; j++){
+		if(need[id][j] < request[j] /*&& j < data->sharedNum*/){
+			//printf("ASKED FOR MORE THEN MAX REQUEST\n");
+			if(verbose){
+				displayArr("Available","A ", available);
+				displayMat("Need", need, count);
+			}
+			return false;
+		}
+
+		if(request[j] <= available[j] /*&& j < data->sharedNum*/){
+			available[j] -= request[j];
+			alloc[id][j] += request[j];
+			need[id][j] -= request[j];
+		}else{
+			//printf("NOT ENOUGH RESOURCES AVAILABLE\n");
+		
+			if(verbose){
+				displayArr("Available", "A ", available);
+				displayMat("Need", need, count);
+			}
+			return false;
+		}
+	}
+
+	// Safety Algoirthm
+	int inde = 0;
+	while(inde < count){
+		bool found = false;
+		for(k = 0; k < count; k++){
+			if(finish[k] == 0){
+				for(j = 0; j < MAX_RESOURCE; j++){
+					if(need[k][j] > work[j] && data->sharedNum){
+						break;
+					}
+				}
+				// If k was satisfied
+				if(j == MAX_RESOURCE){
+					for(l = 0; l < MAX_RESOURCE; l++){
+						work[l] += alloc[k][l];
+					}
+					// Add proc to safe sequence
+					safeSeq[inde++] = k;
+
+					// Mark k as finished
+					finish[k] = 1;
+					found = true;
+				}
+			}
+		}
+		// If we couldn't find a proces sfor safe sequence
+		if(found == false){
+			//printf("SYSTEM IS UNSAFE\n");
+			return false;
+		}
+	}
+
+	// Display information again
+	if(verbose){
+		displayArr("Available", "A ", available);
+		displayMat("Need", need, count);
+	}
+
+	// Map safe sequence to queue sequence
+	int seq[count];
+	int seqIndex = 0;
+	next.next = queue->front;
+	while(next.next != NULL){
+		seq[seqIndex++] = next.next->index;
+		// Point to next element
+		if(next.next->next != NULL){
+			next.next = next.next->next;
+		}else{
+			next.next = NULL;
+		}
+	}
+	/*
+	// If in safe sequence then print the sequence
+	printf("OSS HAS FOUND A SAFE SEQUENCE IT IS: ");
+	for(i = 0; i < count; i++){
+		printf("%2d ", seq[safeSeq[i]]);
+
+	}
+	printf("\n");
+	return true;
+	*/
 }
