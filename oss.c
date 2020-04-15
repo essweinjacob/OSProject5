@@ -10,11 +10,13 @@ void getPCB();
 void getData();
 void getMsg();
 void createResources();
-void createProcess(int index);
+void createProcess(int index, int pid);
 void semLock();
 void semRelease();
 void incTimer();
 void spawnCheck();
+bool bankers(int index, int resType);
+void releaseRes(int index, int resType);
 
 // Global Variables
 // Pid list info
@@ -55,7 +57,6 @@ bool spawnReady = true;
 unsigned int lastSpawnSec = 0;
 unsigned int lastSpawnNSec = 0;
 
-
 int main(int argc, int argv[]){
 	// Set up all shared memory
 	getClock();
@@ -74,30 +75,12 @@ int main(int argc, int argv[]){
 	// Fill allocated
 	createResources();
 	int i;
-	/* DEBUG 
-	for(i = 0; i < MAX_RESOURCE; i++){
-		printf("Max resource for R%2d = %d, Shared = %d\n", i, data->resMax[i], data->isShare[i]);
-	}
-	*/
-	for(i = 0; i < MAX_PROC; i++){
-		createProcess(i);
-	}
-	
-	/* DEBUG
-	for(i = 0; i < MAX_PROC; i++){
-		printf("Process P%2d needs the following resources: ", i);
-		int j;
-		for(j = 0; j < MAX_RESOURCE; j++){
-			printf("R%2d: %2d ", j, pcb[i].maxResource[j]);
-		}
-		printf("\n");
-	}
-	*/
 
 	// Variables for forking
 	int activeChild = 0;
 	pid_t pid;
 	int exitCount = 0;
+	int maxLaunch = 0;
 	listOfPIDS = calloc(TOTAL_PROC, sizeof(int));
 	
 	// This will be used to see if a proc index is in use
@@ -113,10 +96,10 @@ int main(int argc, int argv[]){
 	
 	while(1){
 		forkIndex = (forkIndex + 1) % MAX_PROC;
+		//printf("Fork Index: %d\n", forkIndex);
 		//Check if ready to fork
-		if(spawnReady == true && activeChild < MAX_PROC && exitCount < TOTAL_PROC && procAvail[forkIndex] == true){
+		if(spawnReady == true && activeChild < MAX_PROC && exitCount < TOTAL_PROC && maxLaunch < TOTAL_PROC && procAvail[forkIndex] == true){
 			pid = fork();
-			// DEBUG printf("PID = %d\n", pid);
 			// On failure to fork
 			if(pid < 0){
 				perror("FAILED TO FORK");
@@ -135,26 +118,85 @@ int main(int argc, int argv[]){
 				}
 			}else{
 				// In parent
-				printf("P%2d has launched at %2d:%9d\n", forkIndex, timer->sec, timer->nsec);
+				printf("P%d has launched at %d:%d\n", forkIndex, timer->sec, timer->nsec);
 				procAvail[forkIndex] = false;
 				listOfPIDS[forkIndex] = pid;
 				activeChild++;
+				maxLaunch++;
 				spawnReady = false;
 				lastSpawnSec = timer->sec;
 				lastSpawnNSec = timer->nsec;
+
+				// Put details into pcb and message
+				createProcess(forkIndex, pid);
 			}
 		}
-		/* DEBUG else{
-			//printf("Index %d was skipped heres why: spawnReady: %d, activeChild: %d, exitCount: %d, procAvail: %d\n", forkIndex, spawnReady, activeChild, exitCount, procAvail[forkIndex]);
+		/*else{
+			printf("Index %d was skipped heres why: spawnReady: %d, activeChild: %d, exitCount: %d, procAvail: %d\n", forkIndex, spawnReady, activeChild, exitCount, procAvail[forkIndex]);
 			
 		}*/
+
+		incTimer();
+
+		while(1){
+			// Put current index's information into message
+			ossMsg.mtype = ossMsg.pid = pcb[forkIndex].pid;
+			ossMsg.index = forkIndex;
+
+			// Tell user process to run
+			msgsnd(ossMsgID, &ossMsg, (sizeof(struct Message) - sizeof(long)), 0);
+			//printf("OSS: SND ERROR: %s\n", strerror(errno));
+			
+
+			// Receive message back from user process
+			msgrcv(usrMsgID, &usrMsg, (sizeof(struct Message) - sizeof(long)), 1, 0);
+			//printf("OSS: RCV ERROR: %s\n", strerror(errno));
+
+			incTimer();
+			
+			// If user process says that the process terminated
+			if(usrMsg.isTerm == true){
+				printf("OSS: P%d finished running at %d:%d\n", usrMsg.index, timer->sec, timer->nsec);
+				break;
+			}
+			// If user process wants to get resources
+			if(usrMsg.isReq == true){
+				printf("OSS has detected process P%d requesting R%d at time %d:%d\n", usrMsg.index, usrMsg.resType, timer->sec, timer->nsec);
+
+				// Launch Banker's Algorithm to see if its safe to give process a resource
+				ossMsg.mtype = pid;
+
+				incTimer();
+
+				bool isSafe = bankers(usrMsg.index, usrMsg.resType);
+				if(isSafe){
+					ossMsg.isSafe = true;
+					printf("OSS has granted P%d request of R%d at time %d:%d\n", usrMsg.index, usrMsg.resType, timer->sec, timer->nsec);
+				}else{
+					printf("OSS has denied P%d request of R%d at time %d:%d\n", usrMsg.index, usrMsg.resType, timer->sec, timer->nsec);
+					ossMsg.isSafe = false;
+				}
+				// Tell user process if it was given resources or not
+				msgsnd(ossMsgID, &ossMsg, (sizeof(struct Message) - sizeof(long)), 0);
+				//printf("OSS: SND ERROR: %s\n", strerror(errno));
+				break;
+			}
+			// If user process wants to release resources
+			if(usrMsg.isRel == true){
+				printf("OSS has detected process P%d releaseing R%d at time %d:%d\n", usrMsg.index, usrMsg.resType, timer->sec, timer->nsec);
+				releaseRes(usrMsg.index, usrMsg.resType);
+				break;
+			}
+		}
+
+		incTimer();
 
 		// Check if child has ended
 		int status;
 		pid_t childPid = waitpid(-1, &status, WNOHANG);
 		if(childPid > 0){
 			int returnIndex = WEXITSTATUS(status);
-			printf("P%2d has exited at time %2d:%9d\n", returnIndex, timer->sec, timer->nsec);
+			// DEBUG printf("P%2d has exited at time %2d:%9d\n", returnIndex, timer->sec, timer->nsec);
 			procAvail[returnIndex] = true;
 			activeChild--;
 			exitCount++;
@@ -175,7 +217,11 @@ int main(int argc, int argv[]){
 		if(spawnReady == false){
 			spawnCheck();
 		}
-
+		
+		/* DEBUG
+		printf("Exit count: %d\n", exitCount);
+		printf("Active Childred: %d\n", activeChild);
+		*/
 	}
 
     	// Program Finished
@@ -305,6 +351,7 @@ void incTimer(){
 	while(timer->nsec >= 1000000000){
 		timer->sec++;
 		timer->nsec -= 1000000000;
+		// DEBUG printf("Stuck in timer?\n");
 	}
 
 	semRelease();
@@ -338,14 +385,15 @@ void createResources(){
 	}
 }
 
-void createProcess(int index){
+void createProcess(int index, pid_t pid){
 	int i;
+	pcb[index].index = index;
+	pcb[index].pid = pid;
 	for(i = 0; i < MAX_RESOURCE; i++){
 		pcb[index].maxResource[i] = (rand() % (data->resMax[i])) + 1;
 		pcb[index].allocResource[i] = 0;
 		pcb[index].reqResource[i] = 0;
 		pcb[index].relResource[i] = 0;
-
 	}
 }
 
@@ -354,4 +402,20 @@ void spawnCheck(){
 	if((((timer->sec * 1000000000) + timer->nsec) - ((lastSpawnSec * 1000000000) + lastSpawnNSec)) >= randomTime){
 		spawnReady = true;
 	}
+}
+
+bool bankers(int index, int resType){
+	if(data->resAvail[resType] >= pcb[index].reqResource[resType]){
+		pcb[index].allocResource[resType] += pcb[index].reqResource[resType];
+		data->resAvail[resType] -= pcb[index].reqResource[resType];
+		pcb[index].reqResource[resType] = 0;
+		return true;
+	}else{
+		return false;
+	}
+}
+
+void releaseRes(int index, int resType){
+	data->resAvail[resType] += pcb[index].allocResource[resType];
+	pcb[index].allocResource[resType] = 0;
 }

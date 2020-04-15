@@ -52,8 +52,133 @@ int main(int argc, char *argv[]){
 	pid_t thisPID = getpid();
 	srand(thisPID);
 	int index = atoi(argv[1]);
+
+	bool isReq = false;
+	bool isAcq = false;
+	bool ranSec = false;
+	struct Clock userStartClock;
+	struct Clock userEndClock;
+	userStartClock.sec = timer->sec;
+	userStartClock.nsec = timer->nsec;
+
 	//printf("Process%2d: is in childe\n", index);
 	// DEBUG printf("Have entered child\n");
+	
+	while(1){
+		int rcvStat = msgrcv(ossMsgID, &ossMsg, (sizeof(struct Message) - sizeof(long)), getpid(), 0);
+		//printf("USER: RCV ERROR: %s\n", strerror(errno));
+
+		// Check and see if process has ran for a second
+		if(!ranSec){
+			userEndClock.sec = timer->sec;
+			userEndClock.nsec = timer->nsec;
+
+			if((((userEndClock.sec * 1000000000) + userEndClock.nsec) - ((userStartClock.sec * 1000000000) + userStartClock.nsec)) >= 1000000000){
+				ranSec = true;
+				printf("process has ran for a second\n");
+			}
+		}
+
+		/* Determine what the child does
+		 * 0 - Process should request resources
+		 * 1 - Process should release resources
+		 * 2 - Process should early term and free up resources
+		 */
+		bool isTerm = false;
+		bool isRele = false;
+		int choice;
+		// If the process has run for at least a second
+		if(ranSec){
+			choice = rand() % 3;
+		}else{
+			choice = rand() % 2;
+		}
+		
+		// Perform action
+		// Request resources
+		int randResource;
+		if(choice == 0){
+			// Make sure process isnt already requesting resources
+			if(!isReq){
+				// Request only a resource we need
+				while(1){
+					randResource = rand() % 20;
+					// Makes sure we are requesting a resource we need
+					if(pcb[index].maxResource[randResource] > 0){
+						// Choose an amount between what we need and 1
+						int requestAmount = rand() % (pcb[index].maxResource[randResource]-pcb[index].allocResource[randResource]);
+						// Resources 
+						pcb[index].reqResource[randResource] = requestAmount;
+						isReq = true;
+						usrMsg.isTerm = false;
+						usrMsg.resType = randResource;
+						break;
+					}
+				}
+			}	
+		}else if(choice == 1){
+			// Make sure we have resources in this process before releaseing them
+			if(isAcq){
+				while(1){
+					randResource = rand() % 20;
+					// If we have more then one of a specific resource
+					if(pcb[index].allocResource[randResource] > 0){
+						pcb[index].relResource[randResource] = pcb[index].allocResource[randResource];
+						isRele = true;
+						usrMsg.isTerm = false;
+						usrMsg.resType = randResource;
+						break;
+					}
+				}
+			}
+		}else if(choice == 2){
+			isTerm = true;
+		}
+
+		// Tell master what it did
+		usrMsg.mtype = 1;
+		if(isReq){
+			usrMsg.isReq = true;
+		}else{
+			usrMsg.isReq = false;
+		}
+		if(isRele){
+			usrMsg.isRel = true;
+		}else{
+			usrMsg.isRel = false;
+		}
+		if(isTerm){
+			usrMsg.isTerm = true;
+		}else{
+			usrMsg.isTerm = false;
+		}
+
+		usrMsg.index = ossMsg.index;
+		usrMsg.pid = ossMsg.pid;
+		msgsnd(usrMsgID, &usrMsg, (sizeof(struct Message) - sizeof(long)), 0);
+		//printf("USER SND ERROR: %s\n", strerror(errno));
+
+
+		// What to do after telling OSS what it did
+		if(isTerm){
+			break;
+		}else{
+			// If its not going to terminate, then act on what the OSS tells it back
+			// If it requested resources...
+			if(isReq){
+				msgrcv(ossMsgID, &ossMsg, (sizeof(struct Message) - sizeof(long)), getpid(), 0);
+				//printf("USER RCV RESPONCE: %s\n", strerror(errno));
+				// ... was told hit was allowed those resources
+				if(ossMsg.isSafe == true){
+					//printf("user request receive message received\n");
+					isAcq = true;
+					isReq = false;
+				}
+			}else if(isRele){
+				isRele = false;
+			}
+		}
+	}
 	
 	return index;
 }

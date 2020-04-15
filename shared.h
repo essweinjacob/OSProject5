@@ -11,6 +11,8 @@
 #include <sys/msg.h>	// Shared Messaging
 #include <sys/sem.h>	// Semaphores
 #include <math.h>	// Rounding some numbers
+#include <errno.h>	// Errno
+#include <string.h>	// String
 
 #define MAX_PROC 18
 #define MAX_FILE_LENGTH 1000000
@@ -47,7 +49,8 @@ struct Message{
 	bool isReq;
 	bool isRel;
 	bool isTerm;
-	bool reqSafe;
+	bool isSafe;
+	int resType;
 };
 
 #endif
